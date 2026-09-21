@@ -59,7 +59,6 @@ app.post('/scan', async (req, res) => {
       throw new Error('No analysis ID returned');
     }
 
-    // VirusTotal ko time do scan karne ka (15 sec)
     await new Promise((resolve) => setTimeout(resolve, 15000));
 
     const report = await axios.get(`https://www.virustotal.com/api/v3/analyses/${analysisId}`, {
@@ -69,15 +68,15 @@ app.post('/scan', async (req, res) => {
 
     const stats = report.data?.data?.attributes?.stats || { malicious: 0, suspicious: 0, harmless: 0, undetected: 0 };
     const malicious = stats.malicious || 0;
-    const suspicious = stats.suspicious || 0;
     const harmless = stats.harmless || 0;
     const undetected = stats.undetected || 0;
-    const total = malicious + suspicious + harmless + undetected;
+    const total = malicious + (stats.suspicious || 0) + harmless + undetected;
 
+    // FINAL LOGIC: 0-2 flags = SAFE
     let verdict = 'SAFE';
     if (malicious >= 5) {
       verdict = 'DANGEROUS';
-    } else if (malicious >= 1 || suspicious >= 2) {
+    } else if (malicious >= 3) {
       verdict = 'SUSPICIOUS';
     } else {
       verdict = 'SAFE';
