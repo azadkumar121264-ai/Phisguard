@@ -12,7 +12,7 @@ function App() {
     setResult(null)
 
     try {
-      const res = await axios.post(`${import.meta.env.VITE_API_URL}/scan`, { url })
+      const res = await axios.post(import.meta.env.VITE_API_URL + '/scan', { url })
       setResult(res.data)
     } catch (error) {
       const serverMessage = error?.response?.data
