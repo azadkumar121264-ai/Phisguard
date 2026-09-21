@@ -12,13 +12,19 @@ function App() {
     setResult(null)
 
     try {
-      const res = await axios.post(import.meta.env.VITE_API_URL + '/scan', { url })
+      const apiUrl = import.meta.env.VITE_API_URL
+      if (!apiUrl) {
+        throw new Error('Backend URL is not configured.')
+      }
+
+      const res = await axios.post(`${apiUrl.replace(/\/$/, '')}/scan`, { url })
       setResult(res.data)
     } catch (error) {
       const serverMessage = error?.response?.data
       const message =
         serverMessage?.score ||
         serverMessage?.message ||
+        error?.message ||
         'Backend unavailable. Please start the backend server.'
       setResult({
         verdict: 'ERROR',
