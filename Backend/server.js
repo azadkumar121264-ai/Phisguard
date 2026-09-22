@@ -50,13 +50,16 @@ app.post('/scan', async (req, res) => {
       validateStatus: () => true
     });
 
-    if (submit.status !== 200 && submit.status !== 202) {
-      throw new Error(`Submit failed: ${submit.status}`);
+    if (submit.status < 200 || submit.status >= 300) {
+      const message = submit.status === 429
+        ? 'VirusTotal rate limit reached. Please try again later.'
+        : 'VirusTotal could not scan this URL.';
+      return res.status(502).json({ verdict: 'ERROR', score: message, url });
     }
 
     const analysisId = submit.data?.data?.id;
     if (!analysisId) {
-      throw new Error('No analysis ID returned');
+      return res.status(502).json({ verdict: 'ERROR', score: 'VirusTotal returned no scan ID', url });
     }
 
     await new Promise((resolve) => setTimeout(resolve, 15000));
@@ -66,25 +69,26 @@ app.post('/scan', async (req, res) => {
       validateStatus: () => true
     });
 
-    const stats = report.data?.data?.attributes?.stats || { malicious: 0, suspicious: 0, harmless: 0, undetected: 0 };
+    if (report.status < 200 || report.status >= 300) {
+      return res.status(502).json({ verdict: 'ERROR', score: 'VirusTotal could not return the scan result', url });
+    }
+
+    const stats = report.data?.data?.attributes?.stats;
+    if (!stats) {
+      return res.status(502).json({ verdict: 'ERROR', score: 'VirusTotal scan is still processing', url });
+    }
+
     const malicious = stats.malicious || 0;
+    const suspicious = stats.suspicious || 0;
     const harmless = stats.harmless || 0;
     const undetected = stats.undetected || 0;
-    const total = malicious + (stats.suspicious || 0) + harmless + undetected;
+    const total = malicious + suspicious + harmless + undetected;
 
-    // FINAL LOGIC: 0-2 flags = SAFE
-    let verdict = 'SAFE';
-    if (malicious >= 5) {
-      verdict = 'DANGEROUS';
-    } else if (malicious >= 3) {
-      verdict = 'SUSPICIOUS';
-    } else {
-      verdict = 'SAFE';
-    }
+    const verdict = malicious > 0 ? 'MALICIOUS' : suspicious > 0 ? 'SUSPICIOUS' : 'SAFE';
 
     return res.json({
       verdict,
-      score: `${malicious} / ${total} engines flagged`,
+      score: `${malicious} malicious, ${suspicious} suspicious (${total} engines checked)`,
       details: stats,
       url
     });

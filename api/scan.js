@@ -6,8 +6,16 @@ export default async function handler(req, res) {
   if (req.method === 'OPTIONS') return res.status(200).end();
   if (req.method !== 'POST') return res.status(405).json({ error: "Use POST method" });
 
-  const { url } = req.body;
-  if (!url) return res.status(400).json({ error: "URL is required" });
+  const rawUrl = typeof req.body?.url === 'string' ? req.body.url.trim() : '';
+  if (!rawUrl) return res.status(400).json({ verdict: "ERROR", score: "URL is required" });
+  const url = rawUrl.startsWith('http://') || rawUrl.startsWith('https://')
+    ? rawUrl
+    : `https://${rawUrl}`;
+  try {
+    new URL(url);
+  } catch {
+    return res.status(400).json({ verdict: "ERROR", score: "Invalid URL", url: rawUrl });
+  }
 
   // === 1. IP-BASED PHISHING CHECK ===
   try {
@@ -49,8 +57,11 @@ export default async function handler(req, res) {
     const submitData = await submitRes.json();
     const analysisId = submitData.data?.id;
 
-    if (!analysisId) {
-      return res.status(500).json({ error: "VirusTotal failed", raw: submitData });
+    if (submitRes.status < 200 || submitRes.status >= 300 || !analysisId) {
+      const score = submitRes.status === 429
+        ? "VirusTotal rate limit reached. Please try again later."
+        : "VirusTotal could not scan this URL.";
+      return res.status(502).json({ verdict: "ERROR", score, url });
     }
 
     // Poll for result - 16 sec wait
@@ -74,7 +85,7 @@ export default async function handler(req, res) {
         verdict: "SCANNING",
         score: "Scan queued",
         message: "Scan is queued. Wait 15 sec and scan again.",
-        stats: { malicious: 0, suspicious: 0, harmless: 0, undetected: 90 },
+        stats: { malicious: 0, suspicious: 0, harmless: 0, undetected: 0 },
         engines: 0
       });
     }
