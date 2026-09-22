@@ -18,18 +18,30 @@ Phishing attacks increased by 65% in 2024-25. Users can't identify fake links li
 I have integrated the **Official Live VirusTotal API v3**.
 
 1. User submits URL -> Frontend calls my secure backend
-2. Backend calls `virustotal.com/api/v3/urls` with private `VT_API_KEY`
-3. VirusTotal scans with **90+ engines** - Google Safe Browsing, Kaspersky, McAfee, BitDefender
-4. Secure result is returned
+2. **Phishing heuristics** (offline, instant) look for typosquatting and homoglyphs
+   (`g00gle`, `paypa1`), punycode look-alikes, raw IP hosts, credential keywords,
+   abused TLDs, `@`-tricks, executable downloads and more
+3. The backend looks the URL up in VirusTotal (`/api/v3/urls`) with the private `VT_API_KEY`
+4. Both layers are merged into one honest verdict: `SAFE`, `SUSPICIOUS`, `MALICIOUS`
+   or `UNKNOWN`
 
 `API Key is stored as Secret in Vercel - Never exposed to frontend.`
 
-### ⏱️ Why Does It Take 15 Seconds?
-1. **Real-Time Scan:** Fresh scan, not cached data.
-2. **90+ Engines Check:** All engines crawl domain reputation, SSL, redirection.
-3. **Polling:** Backend waits till `status: completed` for 100% accuracy.
+### 🧠 Why "Unable To Identify" Instead Of "Safe"?
+VirusTotal is **reputation based**: a freshly registered phishing domain has no
+reputation yet, so every engine reports `undetected` and the URL looks clean.
+"No engine flagged it" is therefore *not* proof that a link is safe. PhishGuard
+never labels such a URL `SAFE` - it reports `UNABLE TO IDENTIFY` and shows the
+phishing patterns it found, so a brand-new clone like `goggle.com` is still caught
+by the heuristics layer.
 
-This delay = Accuracy & Security.
+### ⏱️ Why Does It Still Take A Few Seconds?
+1. **Real-Time Scan:** A cached VirusTotal report is reused when one already exists.
+2. **90+ Engines Check:** All engines check domain reputation, SSL and redirection.
+3. **Polling:** The backend polls the analysis a couple of times - staying inside the
+   free 4 requests/minute quota - and picks the finished analysis up on your next click.
+
+Accuracy & Security, without false "safe" answers.
 
 ### 💻 Tech Stack
 - **Languages Used:** JavaScript, CSS, HTML
