@@ -4,30 +4,37 @@ export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
   if (req.method === 'OPTIONS') return res.status(200).end();
-  if (req.method !== 'POST') return res.status(405).json({ error: "Use POST" });
+  if (req.method !== 'POST') return res.status(405).json({ error: "Use POST method" });
 
   const { url } = req.body;
-  if (!url) return res.status(400).json({ error: "URL required" });
+  if (!url) return res.status(400).json({ error: "URL is required" });
 
-  // 1. IP based check
+  // === 1. IP-BASED PHISHING CHECK ===
   try {
-    const hostname = new URL(url).hostname;
+    const parsedUrl = new URL(url.startsWith('http') ? url : `http://${url}`);
+    const hostname = parsedUrl.hostname;
     if (/^\d+\.\d+\.\d+\.\d+$/.test(hostname)) {
       return res.status(200).json({
         url,
-        result: "SUSPICIOUS",
-        verdict: "SUSPICIOUS",
-        score: "IP-based URL detected",
-        message: "IP-based URL detected - Highly risky (Phishing pattern)",
-        stats: { malicious: 1, suspicious: 1, harmless: 0, undetected: 0 },
-        engines: 2
+        result: "UNSAFE",
+        verdict: "MALICIOUS",
+        score: "Direct IP address detected",
+        message: "IP-based URL detected - Very common in phishing",
+        stats: { malicious: 0, suspicious: 1, harmless: 0, undetected: 0 },
+        engines: 1,
+        details: { reason: "Direct IP login" }
       });
     }
-  } catch {}
+  } catch (e) {
+    // Invalid URL ignore
+  }
 
+  // === 2. VirusTotal Scan ===
   try {
     const VT_API_KEY = process.env.VT_API_KEY;
-    if (!VT_API_KEY) throw new Error("VT_API_KEY not set in Vercel");
+    if (!VT_API_KEY) {
+      return res.status(500).json({ error: "Server API Key missing in Vercel" });
+    }
 
     // Submit URL
     const formData = new URLSearchParams();
@@ -38,55 +45,64 @@ export default async function handler(req, res) {
       headers: { "x-apikey": VT_API_KEY },
       body: formData
     });
+
     const submitData = await submitRes.json();
     const analysisId = submitData.data?.id;
-    if (!analysisId) throw new Error("VirusTotal submit failed");
 
-    // Poll 15 sec
-    let stats = null;
+    if (!analysisId) {
+      return res.status(500).json({ error: "VirusTotal failed", raw: submitData });
+    }
+
+    // Poll for result - 16 sec wait
+    let finalStats = null;
     for (let i = 0; i < 4; i++) {
       await new Promise(r => setTimeout(r, 4000));
-      const checkRes = await fetch(`https://www.virustotal.com/api/v3/analyses/${analysisId}`, {
+      const analysisRes = await fetch(`https://www.virustotal.com/api/v3/analyses/${analysisId}`, {
         headers: { "x-apikey": VT_API_KEY }
       });
-      const checkData = await checkRes.json();
-      if (checkData.data?.attributes?.status === 'completed') {
-        stats = checkData.data.attributes.stats;
+      const analysisData = await analysisRes.json();
+      if (analysisData.data?.attributes?.status === 'completed') {
+        finalStats = analysisData.data.attributes.stats;
         break;
       }
     }
 
-    if (!stats) {
+    if (!finalStats) {
       return res.status(200).json({
         url,
         result: "SCANNING",
         verdict: "SCANNING",
         score: "Scan queued",
-        message: "Scan queued, wait 15 sec and try again",
+        message: "Scan is queued. Wait 15 sec and scan again.",
         stats: { malicious: 0, suspicious: 0, harmless: 0, undetected: 90 },
         engines: 0
       });
     }
 
-    const malicious = stats.malicious || 0;
-    const suspicious = stats.suspicious || 0;
+    const malicious = finalStats.malicious || 0;
+    const suspicious = finalStats.suspicious || 0;
+    const harmless = finalStats.harmless || 0;
+
     let result = "SAFE";
     if (malicious > 0) result = "UNSAFE";
     else if (suspicious > 0) result = "SUSPICIOUS";
+    else if (harmless === 0 && malicious === 0 && suspicious === 0) {
+      result = "SCANNING";
+    }
     const verdict = result === "UNSAFE" ? "MALICIOUS" : result;
 
     return res.status(200).json({
       url,
       result,
       verdict,
-      score: `${malicious} malicious, ${suspicious} suspicious`,
-      message: result === "SAFE" ? "No engines flagged" : `${malicious} engines flagged as malicious`,
-      stats,
+      score: `${malicious} malicious, ${suspicious} suspicious, ${harmless} harmless`,
+      message: result === "SAFE" ? `Safe - ${harmless} engines say clean` : `${malicious} engines flagged as malicious`,
+      stats: finalStats,
       engines: malicious + suspicious
     });
 
   } catch (err) {
-    console.error(err);
+    console.error("Scan Error:", err);
     return res.status(500).json({ error: "Scan failed", details: err.message });
   }
 }
