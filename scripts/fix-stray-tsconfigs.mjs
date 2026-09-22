@@ -1,35 +1,42 @@
 #!/usr/bin/env node
 /**
- * Removes the unresolvable `"extends": "@ljharb/tsconfig"` entry from the
- * tsconfig.json files that runtime dependencies ship inside node_modules
- * (math-intrinsics, get-intrinsic, gopd, hasown, side-channel, ...).
+ * Removes the tsconfig.json files that runtime dependencies ship inside
+ * node_modules even though nobody but their own maintainer can use them.
  *
- * Why the entry is broken
- *   `@ljharb/tsconfig` is only a *dev*Dependency of those packages, so it is not
- *   installed for consumers. TypeScript therefore reports, for every shipped config:
+ * The problem
+ *   Packages published by ljharb (math-intrinsics, get-intrinsic, gopd, hasown,
+ *   side-channel, ...) ship a tsconfig.json that starts with
+ *       { "extends": "@ljharb/tsconfig", ... }
+ *   while `@ljharb/tsconfig` is only a *dev*Dependency of those packages, so it is
+ *   never installed for consumers. TypeScript then reports, for every shipped config:
  *       File '@ljharb/tsconfig' not found.   (TS6053)
- *   and bundlers that read tsconfig.json (e.g. esbuild-loader via get-tsconfig) fail.
- *   Upstream report (closed as "not planned"): https://github.com/ljharb/tsconfig/issues/2
+ *   Bundlers that read tsconfig.json (esbuild-loader via get-tsconfig) fail as well.
+ *   Upstream report, closed as "not planned": https://github.com/ljharb/tsconfig/issues/2
  *
- * Why we do not simply `npm i -D @ljharb/tsconfig`
- *   That config sets allowJs/checkJs/strict/maxNodeModuleJsDepth, so TypeScript
- *   starts type-checking the dependencies' own JavaScript and reports hundreds of
- *   new errors *inside* node_modules (math-intrinsics, object-inspect, ...).
- *   Dropping the dangling `extends` keeps each config self-contained and error free.
+ * Why we delete instead of repairing
+ *   Installing the missing base (npm i -D @ljharb/tsconfig) makes TypeScript apply
+ *   that strict shared config - allowJs/checkJs/strict/maxNodeModuleJsDepth - and
+ *   type-check the dependencies' own JavaScript: hundreds of new errors.
+ *   Merely deleting the dangling `extends` is not enough either: those configs are
+ *   only complete *with* the missing base, so their remaining options (target: es5
+ *   without lib, ignoreDeprecations, module resolution) then emit new errors such as
+ *   TS2550 inside <package>/isNaN.d.ts.
+ *   The config is meaningless to consumers, so removing it is the clean fix:
+ *   no config means no project, which means no diagnostics.
  *
  * Usage
  *   node scripts/fix-stray-tsconfigs.mjs
  *   (also wired up as the workspace `postinstall` script, so `npm install` re-applies it)
  */
 
-import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-/** matches a whole `"extends": "@ljharb/tsconfig",` line, tab- or space-indented, LF or CRLF */
-const DANGLING_EXTENDS_LINE = /^[ \t]*"extends"[ \t]*:[ \t]*"@ljharb\/tsconfig"[ \t]*,?[ \t]*\r?\n?/gm;
-/** matches the same property when the config is written on a single line */
-const DANGLING_EXTENDS_INLINE = /"extends"[ \t]*:[ \t]*"@ljharb\/tsconfig"[ \t]*,?/g;
+/** the dev-only base these packages extend */
+const MISSING_BASE = '@ljharb/tsconfig';
+/** a config that still points at it directly */
+const DANGLING_EXTENDS = /"extends"\s*:\s*"@ljharb\/tsconfig"/;
 
 const workspaceRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 
@@ -59,39 +66,43 @@ function* installedPackages(nodeModules) {
 	}
 }
 
-/** @returns {boolean} true when the config was rewritten */
-function fixConfig(configPath) {
-	const original = readFileSync(configPath, 'utf8');
-	if (!original.includes('@ljharb/tsconfig')) return false;
-
-	let patched = original.replace(DANGLING_EXTENDS_LINE, '').replace(DANGLING_EXTENDS_INLINE, '');
-	if (patched.includes('@ljharb/tsconfig')) {
-		console.warn(`  ! could not rewrite ${configPath}, left untouched`);
+/** does this package ship a config that can only work with the missing dev-only base? */
+function shipsUnusableConfig(packageDir) {
+	const manifest = join(packageDir, 'package.json');
+	if (existsSync(manifest)) {
+		try {
+			const pkg = JSON.parse(readFileSync(manifest, 'utf8'));
+			if (pkg.devDependencies && MISSING_BASE in pkg.devDependencies) return true;
+		} catch {
+			// unreadable manifest - fall back to inspecting the config itself
+		}
+	}
+	const config = join(packageDir, 'tsconfig.json');
+	if (!existsSync(config)) return false;
+	try {
+		return DANGLING_EXTENDS.test(readFileSync(config, 'utf8'));
+	} catch {
 		return false;
 	}
-	// collapse a config that is now empty: { } -> {}
-	if (/^\s*\{\s*\}\s*$/.test(patched)) patched = '{}\n';
-
-	writeFileSync(configPath, patched);
-	console.log(`  fixed ${configPath}`);
-	return true;
 }
 
-let fixedCount = 0;
+let removed = 0;
 try {
 	for (const nodeModules of findNodeModulesDirs()) {
 		for (const packageDir of installedPackages(nodeModules)) {
-			const configPath = join(packageDir, 'tsconfig.json');
-			if (!existsSync(configPath)) continue;
+			const config = join(packageDir, 'tsconfig.json');
+			if (!existsSync(config) || !shipsUnusableConfig(packageDir)) continue;
 			try {
-				if (fixConfig(configPath)) fixedCount += 1;
+				rmSync(config);
+				removed += 1;
+				console.log(`  removed ${config}`);
 			} catch (error) {
-				console.warn(`  ! skipped ${configPath}: ${error.message}`);
+				console.warn(`  ! could not remove ${config}: ${error.message}`);
 			}
 		}
 	}
-	console.log(`fix-stray-tsconfigs: repaired ${fixedCount} dangling "@ljharb/tsconfig" reference(s)`);
+	console.log(`fix-stray-tsconfigs: removed ${removed} unusable node_modules tsconfig.json file(s)`);
 } catch (error) {
-	// never break `npm install` because of a cosmetic node_modules patch
+	// never break `npm install` because of a cosmetic node_modules cleanup
 	console.warn(`fix-stray-tsconfigs: skipped (${error.message})`);
 }
