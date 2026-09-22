@@ -55,22 +55,33 @@ function App() {
     setResult(null)
 
     try {
-      const configured = import.meta.env.VITE_API_URL
-      if (!configured) throw new Error('Backend URL is not configured.')
+      // Candidate scan endpoints, in order of preference.
+      const configured = (import.meta.env.VITE_API_URL || '').trim().replace(/\/+$/, '')
+      const hosted = !['localhost', '127.0.0.1'].includes(window.location.hostname)
+      const configuredIsLocal = /^https?:\/\/(localhost|127\.0\.0\.1)(:|\/|$)/i.test(configured)
 
-      // The local Express backend answers on /scan, the Vercel function on /api/scan.
-      const base = configured.replace(/\/+$/, '')
-      const endpoints = base.endsWith('/api') ? [`${base}/scan`] : [`${base}/scan`, `${base}/api/scan`]
+      const endpoints = []
+      // The configured backend: the local Express server answers on /scan, a
+      // Vercel function on /api/scan. A localhost URL is skipped when this page
+      // is served from a real host, so a stale dev value cannot break production.
+      if (configured && !(configuredIsLocal && hosted)) {
+        endpoints.push(`${configured}/scan`)
+        if (!configured.endsWith('/api')) endpoints.push(`${configured}/api/scan`)
+      }
+      // Same-origin fallback: on Vercel the static app and the scan function
+      // share a domain, so no environment variable is needed there.
+      endpoints.push(`${window.location.origin}/api/scan`, `${window.location.origin}/scan`)
 
       let lastError = null
-      for (const endpoint of endpoints) {
+      for (const endpoint of new Set(endpoints)) {
         try {
           const res = await axios.post(endpoint, { url })
           setResult(res.data)
           return
         } catch (error) {
           lastError = error
-          if (error?.response?.status !== 404) break
+          // 404 = wrong route, no response = wrong host: try the next candidate.
+          if (error?.response && error.response.status !== 404) break
         }
       }
       throw lastError || new Error('Backend unavailable. Please start the backend server.')
